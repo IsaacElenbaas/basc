@@ -1,0 +1,326 @@
+#!/bin/bash
+
+set +m
+command -v steamcmd &>/dev/null || { printf "steamcmd is missing!\n"; exit 1; }
+# steamcmd doesn't check for an interactive prompt, but it does print to /dev/tty
+#coproc scmd { cat -u <(printf "exec steamcmd\n") - | PS1= bash --noprofile --norc -is 2>&1; }
+coproc scmd { script -q -c "steamcmd" /dev/null; }
+steam=1
+declare -a folders
+# in the form "title folder|id"
+declare -a apps
+export IFS=
+
+#{{{ functions
+	#{{{ checkPrompt
+# strips trailing newlines (before prompt) from output, I don't see an easy fix and don't really care
+checkPrompt() {
+	first=""
+	local first2=""
+	while true; do
+		read -N 1 first2
+		[ "$first2" = $'\033' ] && { timeout 0.05 cat > /dev/null; return 0; } || first="$first$first2"
+		[ "$first2" != $'\n' ] && return 1
+	done
+}
+	#}}}
+
+	#{{{ shell
+shell() {
+	clear
+	# coprocess FDs aren't available to subshells because the GNU Project doesn't trust my janky scripting
+	exec 3<&"${scmd[0]}"
+	cat -u <&3 &
+	local cat_PID=$!
+	local silent=""
+	printf "\033[1mSteam>\033[0m"
+	printf "\033[?25h" # restore cursor
+	[ $# -gt 0 ] && { printf "$@"; printf "$@" >&"${scmd[1]}"; }
+	while read -r$silent line; do
+		silent=""
+		{ [ "$line" = "quit" ] || [ "$line" = "exit" ]; } && break
+		[ "$line" = "clear" ] && { clear; printf "\033[1mSteam>\033[0m"; continue; }
+		[ "${line%%[[:space:]]*}" = "login" ] && [ $(tr -cd " " <<< "${line%${line##*[![:space:]]}}" | wc -c) -lt 2 ] && { silent="s"; printf "Your next line has been silenced for if steamcmd prompts for your password. Hit enter once more if that is not the case.\n"; }
+		printf "%s\n" "$line" >&"${scmd[1]}"
+	done
+	kill $cat_PID
+	printf "\033[?25l" # hide cursor
+}
+	#}}}
+
+	#{{{ loggedIn
+loggedIn() {
+	local loggedIn=1
+	printf "info\n" >&"${scmd[1]}"; {
+		checkPrompt && return 1 ||
+		while read -r line; do
+			# second * required when using script
+			[[ "$first$line" == *"Logged On"* ]] && loggedIn=0
+			checkPrompt && break
+		done
+	} <&"${scmd[0]}"
+	return $loggedIn
+}
+	#}}}
+
+	#{{{ getFolders
+getFolders() {
+	folders=()
+	printf "library_folder_list\n" >&"${scmd[1]}"; {
+		checkPrompt && return 1 ||
+		while read -r line; do
+			line="$first$line"
+			if [ -n "${line##*$'\n'}" ]; then
+				line="$first$line"
+				line="${line##*Path}"
+				line="${line%%,*}" # if you have commas, of all special characters, in your steam library paths I don't know what to say
+				line="${line#${line%%[![:space:]]*}}"; line="${line%${line##*[![:space:]]}}"
+				folders+=("${line:1:-1}")
+			fi
+			checkPrompt && break
+		done
+	} <&"${scmd[0]}"
+	return 0
+}
+	#}}}
+
+	#{{{ getApps
+getApps() {
+	apps=()
+	printf "apps_installed\n" >&"${scmd[1]}"; {
+		checkPrompt && return 1 || {
+			while read -r line; do [[ "${line#* }" == "apps installed"* ]] && break; done
+			while read -r line; do
+				line="$first$line"
+				if [ -n "${line##*$'\n'}" ]; then
+					id="${line%%:*}"
+					id="${id#*AppID}"
+					id="${id#${id%%[![:space:]]*}}"; id="${id%${id##*[![:space:]]}}"
+					title="${line#*:}"
+					title="${title%:*}"
+					title="${title#${title%%[![:space:]]*}}"; title="${title%${title##*[![:space:]]}}"
+					path="${line##*:}"
+					path="${path#${path%%[![:space:]]*}}"
+					for (( folder=0; folder < ${#folders[@]}; folder++ )); do
+						[ "${path::${#folders[$folder]}}" = "${folders[$folder]}" ] && break
+					done
+					apps+=("${title:1:-1} $folder|$id")
+				fi
+				checkPrompt && break
+			done
+		}
+	} <&"${scmd[0]}"
+	IFS=$'\n'; apps=($(sort <<< "${apps[*]}")); IFS=
+	return 0
+}
+	#}}}
+
+	#{{{ getAllApps
+getAllApps() {
+	loggedIn || { printf "Please \`login [username]\` and \`quit\`.\n"; sleep 0.5; read -s line; shell; loggedIn || return 1; }
+	apps=()
+	printf "licenses_print\n" >&"${scmd[1]}"; {
+		checkPrompt && return 1 ||
+		while read -r line; do
+			line="$first$line"
+			if [[ "$line" == *"- Apps"* ]]; then
+				while read -r -d "," id; do
+					id="${id#${id%%[![:space:]]*}}"; id="${id%${id##*[![:space:]]}}"
+					[ -n "${id##*[!0-9]*}" ] || break
+					apps+=("$id")
+				done <<< "${line#*:},"
+			fi
+			checkPrompt && break
+		done
+	} <&"${scmd[0]}"
+	for (( i=0; i < ${#apps[@]}; i++ )); do
+		printf "app_info_print ${apps[$i]}\n" >&"${scmd[1]}"; {
+			local found=0
+			checkPrompt ||
+			while read -r line; do
+				line="$first$line"
+				line="${line#${line%%[![:space:]]*}}"
+				if [ $found -eq 0 ] && [ "${line:1:4}" = "name" ] && [ "${line:0:1}" = "${line:5:1}" ]; then
+					found=1
+					line="${line:6}"
+					line="${line#${line%%[![:space:]]*}}"
+					# this should really be -1 but that doesn't work and 2 does
+					apps[$i]="${line:1:-2} |${apps[$i]}"
+				fi
+				checkPrompt && break
+			done
+		} <&"${scmd[0]}"
+	done
+	IFS=$'\n'; apps=($(sort <<< "${apps[*]}")); IFS=
+	return 0
+}
+	#}}}
+#}}}
+
+#{{{ startup
+if command -v steam &>/dev/null; then
+	( : < /dev/tcp/127.0.0.1/57343 ) &>/dev/null || { steam -no-browser -silent &>/dev/null & disown; }
+else
+	steam=0
+	printf "steam is missing! Running with steamcmd will be attempted instead, but will fail with Proton games.\n"
+	sleep 0.5
+	read -s line
+fi
+
+printf "\033[?1049h"; clear
+{
+	checkPrompt ||
+	while read -r line; do
+		[[ "$line" != *"type"*"quit"* ]] && printf "%s\n" "$first$line"
+		checkPrompt && break
+	done
+} <&"${scmd[0]}"
+printf "Press enter to continue."
+sleep 0.5
+read -s line
+# if steamcmd exits, reading will fail and break to this
+# doesn't seem to be working right now, steamcmd can hang or something but not exit
+kill -0 $scmd_PID 2>/dev/null && clear || exit 1
+
+getFolders
+localLibrary=1
+getApps
+#}}}
+
+#{{{ display
+div=" \033[0m|\033[1m "
+
+printf "\033[?25l" # hide cursor
+index=0
+scrollFrom=0
+scrollTo=-1
+exitCode=-1
+while [ $exitCode -eq -1 ]; do
+	clear
+	maxIndex=$((${#apps[@]}-1))
+	[ $maxIndex -eq 0 ] && printf "No entries found.\n"
+	[ $index -le $maxIndex ] || index=$maxIndex
+	[ $scrollFrom -le $index ] || scrollFrom=$index
+	[ $scrollTo -ne -1 ] || scrollTo=$maxIndex
+	[ $scrollTo -ge $index ] || scrollTo=$index
+	scrollFrom=$(((index-scrollFrom)-(LINES-2) < 0 ? scrollFrom : index-(LINES-2)+1))
+	scrollTo=$(((LINES-2)+scrollFrom-scrollTo > 0 ? scrollTo : scrollFrom+(LINES-2)-1))
+	for (( i=$scrollFrom; i <= $scrollTo; i++ )); do
+		title="${apps[$i]%[[:space:]]*}"
+		if [ $i -eq $index ]; then
+			printf "\033[7m%s\033[0m\n" "$title"
+		else
+			printf "%s\n" "$title"
+		fi
+	done
+	printf "\033[1mq/Esc:quit${div}CR:launch${div}Space:options${div}i:info${div}u:ensure updated${div}t:steamcmd${div}l:switch to local/library\033[0m\n"
+	read -rs -N 1 key
+	read -rs -N 99 -t 0.005 key2
+	key2="$key$key2"
+	while [ -n "$key2" ]; do
+		if [ "${key2::1}" = $'\033' ]; then
+			key2="${key2:1}"
+			key=$'\033'"${key2%%$'\033'*}"
+			key2="${key2#*$'\033'}"
+		else
+			key="${key2:0:1}"
+			key2="${key2:1}"
+		fi
+		case "$key" in
+
+	#{{{ movement
+			$'\033[A')
+				index=$((index>0 ? index-1 : 0))
+			;;
+			$'\033[B')
+				index=$((index < maxIndex ? index+1 : maxIndex))
+			;;
+			"g")
+				index=0
+			;;
+			"G")
+				index=$maxIndex
+			;;
+	#}}}
+
+			"q" | $'\033')
+				exitCode=0
+			;;
+
+	#{{{ CR
+			$'\n')
+				id="${apps[$index]##*|} "
+				[ -z "${id#*[!0-9]}" ] || { clear; printf "Failed to get ID for entry!"; read -s line; }
+				if [ $steam -eq 1 ]; then
+					# -applaunch id is also an option, but I have more faith that this won't change
+					steam -no-browser -silent steam://run/${id:: -1} &>/dev/null & detach
+				else
+					printf "app_run ${id:: -1}\n" >&"${scmd[1]}"; { checkPrompt || while read -r line; do checkPrompt && break; done; } <&"${scmd[0]}"
+				fi
+				printf "Launching ${apps[$index]% *} - press enter to continue.\n"
+				sleep 0.5
+				read -s line
+			;;
+	#}}}
+
+			" ")
+				:
+			;;
+
+	#{{{ i
+			"i")
+				id="${apps[$index]##*|} "
+				[ -z "${id#*[!0-9]}" ] || id="??? "
+				folder="${apps[$index]##* }"
+				folder="${folder%%|*}"
+				[ -n "$folder" ] && folder="${folders[$folder]}" || folder="??? "
+				clear
+				printf "Entry:    %s\nID:       ${id:: -1}\nLocation: %s" "${apps[$index]% *}" "$folder"
+				sleep 0.5
+				read -rs -N 1 key
+				read -rs -N 99 -t 0.005 key2
+				key2="$key$key2"
+				key2="${key2#i}"
+			;;
+	#}}}
+
+			"u")
+				:
+			;;
+			"t")
+				shell
+			;;
+
+	#{{{ l
+			"l")
+				clear
+				if [ $localLibrary -eq 1 ]; then
+					printf "Loading library, please wait. . . \n"
+					getAllApps
+					localLibrary=0
+				else
+					printf "Loading local entries, please wait. . . \n"
+					getApps
+					localLibrary=1
+				fi
+				index=0
+				scrollFrom=0
+				scrollTo=-1
+				key2=""
+			;;
+	#}}}
+
+		esac
+	done
+done
+#}}}
+
+clear
+printf "\033[?25h" # restore cursor
+printf "Exiting. . . \n"
+printf "quit\n\n" >&"${scmd[1]}"
+# required when using cat piped to bash
+eval "exec ${scmd[1]}>&-"
+wait $scmd_PID
+printf "\033[?1049l"
+exit $exitCode
