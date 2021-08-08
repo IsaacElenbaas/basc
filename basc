@@ -253,7 +253,7 @@ while [ $exitCode -eq -1 ]; do
 				[ -z "${id#*[!0-9]}" ] || { clear; printf "Failed to get ID for entry!"; read -s line; }
 				if [ $steam -eq 1 ]; then
 					# -applaunch id is also an option, but I have more faith that this won't change
-					steam -no-browser -silent steam://run/${id:: -1} &>/dev/null & detach
+					steam -no-browser -silent steam://run/${id:: -1} &>/dev/null & disown
 				else
 					printf "app_run ${id:: -1}\n" >&"${scmd[1]}"; { checkPrompt || while read -r line; do checkPrompt && break; done; } <&"${scmd[0]}"
 				fi
