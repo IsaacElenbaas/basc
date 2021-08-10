@@ -12,6 +12,18 @@ declare -a apps
 export IFS=
 
 #{{{ functions
+	#{{{ status
+status() {
+	local line
+	[ ${#@} -gt 1 ] && {
+		[ $1 -eq 1 ] && clear
+		printf "${@:2}"
+	}
+	timeout 0.5 cat > /dev/null
+	[ $1 -eq 1 ] && { printf "Press enter to continue.\n"; read -s line; timeout 0.05 cat > /dev/null; }
+}
+	#}}}
+
 	#{{{ checkPrompt
 # strips trailing newlines (before prompt) from output, I don't see an easy fix and don't really care
 checkPrompt() {
@@ -117,7 +129,7 @@ getApps() {
 
 	#{{{ getAllApps
 getAllApps() {
-	loggedIn || { printf "Please \`login [username]\` and \`quit\`.\n"; sleep 0.5; read -s line; shell; loggedIn || return 1; }
+	loggedIn || { status 1 "Please \`login [username]\` and \`quit\`.\n"; shell; loggedIn || return 1; }
 	apps=()
 	printf "licenses_print\n" >&"${scmd[1]}"; {
 		checkPrompt && return 1 ||
@@ -162,9 +174,7 @@ if command -v steam &>/dev/null; then
 	( : < /dev/tcp/127.0.0.1/57343 ) &>/dev/null || { steam -no-browser -silent &>/dev/null & disown; }
 else
 	steam=0
-	printf "steam is missing! Running with steamcmd will be attempted instead, but will fail with Proton games.\n"
-	sleep 0.5
-	read -s line
+	status 1 "steam is missing! Running with steamcmd will be attempted instead, but will fail with Proton games.\n"
 fi
 
 printf "\033[?1049h"; clear
@@ -175,9 +185,7 @@ printf "\033[?1049h"; clear
 		checkPrompt && break
 	done
 } <&"${scmd[0]}"
-printf "Press enter to continue."
-sleep 0.5
-read -s line
+status 1
 # if steamcmd exits, reading will fail and break to this
 # doesn't seem to be working right now, steamcmd can hang or something but not exit
 kill -0 $scmd_PID 2>/dev/null && clear || exit 1
@@ -250,16 +258,14 @@ while [ $exitCode -eq -1 ]; do
 	#{{{ CR
 			$'\n')
 				id="${apps[$index]##*|} "
-				[ -z "${id#*[!0-9]}" ] || { clear; printf "Failed to get ID for entry!"; read -s line; }
+				{ [ -n "$id" ] && [ -z "${id#*[!0-9]}" ]; } || status 1 "Failed to get ID for entry!"
 				if [ $steam -eq 1 ]; then
 					# -applaunch id is also an option, but I have more faith that this won't change
 					steam -no-browser -silent steam://run/${id:: -1} &>/dev/null & disown
 				else
 					printf "app_run ${id:: -1}\n" >&"${scmd[1]}"; { checkPrompt || while read -r line; do checkPrompt && break; done; } <&"${scmd[0]}"
 				fi
-				printf "Launching ${apps[$index]% *} - press enter to continue.\n"
-				sleep 0.5
-				read -s line
+				status 1 "Launching ${apps[$index]% *}...\n"
 			;;
 	#}}}
 
@@ -275,8 +281,7 @@ while [ $exitCode -eq -1 ]; do
 				folder="${folder%%|*}"
 				[ -n "$folder" ] && folder="${folders[$folder]}" || folder="??? "
 				clear
-				printf "Entry:    %s\nID:       ${id:: -1}\nLocation: %s" "${apps[$index]% *}" "$folder"
-				sleep 0.5
+				status 0 "Entry:    %s\nID:       ${id:: -1}\nLocation: %s" "${apps[$index]% *}" "$folder"
 				read -rs -N 1 key
 				read -rs -N 99 -t 0.005 key2
 				key2="$key$key2"
@@ -295,11 +300,11 @@ while [ $exitCode -eq -1 ]; do
 			"l")
 				clear
 				if [ $localLibrary -eq 1 ]; then
-					printf "Loading library, please wait. . . \n"
+					printf "Loading library, please wait...\n"
 					getAllApps
 					localLibrary=0
 				else
-					printf "Loading local entries, please wait. . . \n"
+					printf "Loading local entries, please wait...\n"
 					getApps
 					localLibrary=1
 				fi
@@ -317,7 +322,7 @@ done
 
 clear
 printf "\033[?25h" # restore cursor
-printf "Exiting. . . \n"
+printf "Exiting...\n"
 printf "quit\n\n" >&"${scmd[1]}"
 # required when using cat piped to bash
 eval "exec ${scmd[1]}>&-"
